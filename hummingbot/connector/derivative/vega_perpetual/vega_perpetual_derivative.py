@@ -444,7 +444,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
                 await order.get_exchange_order_id()
         track_order: List[InFlightOrder] = [o for o in tracked_orders if exchange_order_id == o.exchange_order_id]
         # if this is none request using the exchange order id
-        if track_order[0] is None:
+        if len(track_order) == 0 or track_order[0] is None:
             order_update: OrderUpdate = await self._request_order_status(exchange_order_id=exchange_order_id)
             client_order_id = order_update.client_order_id
         else:
