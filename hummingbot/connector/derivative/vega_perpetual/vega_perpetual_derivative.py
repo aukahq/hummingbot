@@ -360,7 +360,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
             self._order_tracker.process_order_update(order_update)
             return True
 
-        if order.current_state in [OrderState.PENDING_CANCEL, OrderState.PENDING_CANCEL]:
+        if order.current_state in [OrderState.PENDING_CANCEL, OrderState.PENDING_CREATE]:
             return False
 
         cancelled = await self._place_cancel(order.client_order_id, order)
