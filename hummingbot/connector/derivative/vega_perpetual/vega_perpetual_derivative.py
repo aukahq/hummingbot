@@ -1,5 +1,9 @@
 import asyncio
 import json
+import math
+import platform
+import re
+import subprocess
 import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, AsyncIterable, Dict, List, Optional, Tuple
@@ -65,6 +69,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
         self._locked_balances = {}
         self._exchange_order_id_to_hb_order_id = {}
         self._has_updated_throttler = False
+        self._best_connection_endpoint = ""
 
         super().__init__(client_config_map)
 
@@ -139,6 +144,39 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
         # Default to 10 minutes
         return 600
 
+    async def connection_base(self) -> None:
+        endpoints = CONSTANTS.PERPETUAL_API_ENDPOINTS
+        if self._domain == CONSTANTS.TESTNET_DOMAIN:
+            endpoints = CONSTANTS.TESTNET_API_ENDPOINTS
+
+        results: List[Dict[str, Decimal]] = []
+
+        for connection in endpoints:
+            _connection = connection.replace("https://", "").replace("/", "")
+            _connection = _connection.split(":")[0]
+            try:
+                # Match on the output to fetch the time=
+                time_ms_match = re.search(
+                    "(?<=time=)(.*)",
+                    subprocess.check_output(
+                        "ping -{} 1 {}".format("n" if platform.system().lower() == "windows" else "c", _connection), shell=True
+                    ).decode()
+                )
+                # Check to ensure we have a match
+                if len(time_ms_match.group()) > 0:
+                    _time_ms = Decimal(time_ms_match[0].replace(' ms', ''))
+                    results.append({"connection": connection, "latency": _time_ms})
+            except Exception as e:
+                self.logger().debug(f"Unable to fetch and match for endpoint {_connection} {e}")
+        if len(results) > 0:
+            # Sort the results
+            sorted_result = sorted(results, key=lambda x: x['latency'])
+            # Return the connection endpoint with the best response time
+            self.logger().debug(sorted_result[0])
+            self._best_connection_endpoint = sorted_result[0]["connection"]
+        else:
+            raise IOError("Unable to reach any endpoint for Vega Protocol, check configuration and try again.")
+
     def supported_order_types(self) -> List[OrderType]:
         """
         :return a list of OrderType supported by this connector
@@ -189,6 +227,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
         This is used for initialization of the connector.
         NOTE: this is NOT called when the connector is used to get balance or similar, a new instance is used
         """
+        await self.connection_base()
         if not self.authenticator.confirm_pub_key_matches_generated():
             self.logger().error("The generated key doesn't match the public key you provided, review your connection and try again.")
         await self._populate_symbols()
@@ -306,12 +345,46 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
         )
         self._do_housekeeping()
 
+    async def _execute_order_cancel_and_process_update(self, order: InFlightOrder) -> bool:
+        # Modification to handle failed orders, we're still trying to process for cancel.
+        if order.current_state == OrderState.FAILED:
+            update_timestamp = self.current_timestamp
+            if update_timestamp is None or math.isnan(update_timestamp):
+                update_timestamp = self._time()
+            order_update: OrderUpdate = OrderUpdate(
+                client_order_id=order.client_order_id,
+                trading_pair=order.trading_pair,
+                update_timestamp=update_timestamp,
+                new_state=(OrderState.FAILED),
+            )
+            self._order_tracker.process_order_update(order_update)
+            return True
+
+        if order.current_state in [OrderState.PENDING_CANCEL, OrderState.PENDING_CANCEL]:
+            return False
+
+        cancelled = await self._place_cancel(order.client_order_id, order)
+        if cancelled:
+            update_timestamp = self.current_timestamp
+            if update_timestamp is None or math.isnan(update_timestamp):
+                update_timestamp = self._time()
+            order_update: OrderUpdate = OrderUpdate(
+                client_order_id=order.client_order_id,
+                trading_pair=order.trading_pair,
+                update_timestamp=update_timestamp,
+                new_state=(OrderState.CANCELED
+                           if self.is_cancel_request_in_exchange_synchronous
+                           else OrderState.PENDING_CANCEL),
+            )
+            self._order_tracker.process_order_update(order_update)
+        return cancelled
+
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         market_id = await self.exchange_symbol_associated_to_pair(trading_pair=tracked_order.trading_pair)
 
         if tracked_order.current_state == OrderState.FAILED:
-            self.logger().warning(f"Order {tracked_order.current_state} for {order_id}")
-            return True
+            self.logger().debug(f"Order {tracked_order.current_state} for {order_id}")
+            return False
 
         if tracked_order.current_state not in [OrderState.OPEN, OrderState.PARTIALLY_FILLED]:
             self.logger().debug(f"Not canceling order due to state {tracked_order.current_state} for {order_id}")
@@ -465,7 +538,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
                     try:
                         await order.get_exchange_order_id()
                     except Exception as e:
-                        self.logger().warning(f"Unable to locate order on exchange waiting to sync with blockchain {e}")
+                        self.logger().info(f"Unable to locate order on exchange waiting to sync with blockchain {e}")
         track_order: List[InFlightOrder] = [o for o in tracked_orders if exchange_order_id == o.exchange_order_id]
         # if this is none request using the exchange order id
         if len(track_order) == 0 or track_order[0] is None:
@@ -1256,10 +1329,14 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
             **kwargs,
     ) -> Dict[str, Any]:
         rest_assistant = await self._web_assistants_factory.get_rest_assistant()
-        url = web_utils.rest_url(path_url, self.domain, api_version)
+        # If we have yet to start network, process it and accept just the base connection.
+        if self._best_connection_endpoint == "":
+            # This handles the initial request without lagging the entire bot.
+            self._best_connection_endpoint = CONSTANTS.PERPETUAL_BASE_URL if self._domain == "vega_perpetual" else CONSTANTS.TESTNET_BASE_URL
+        url = web_utils._rest_url(path_url, self._best_connection_endpoint, api_version)
         if not full_append:
             # we want to use the short url which doesnt have api and version
-            url = web_utils.short_url(path_url, self.domain)
+            url = web_utils._short_url(path_url, self._best_connection_endpoint)
         if is_block_explorer:
             url = web_utils.explorer_url(path_url, self.domain)
 
