@@ -358,9 +358,11 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
                 new_state=(OrderState.FAILED),
             )
             self._order_tracker.process_order_update(order_update)
+            self.logger().debug("Attempting to cancel a failed order, unable to do so.")
             return True
 
         if order.current_state in [OrderState.PENDING_CANCEL, OrderState.PENDING_CREATE]:
+            self.logger().debug("Attempting to cancel a pending order, unable to do so.")
             return False
 
         cancelled = await self._place_cancel(order.client_order_id, order)
