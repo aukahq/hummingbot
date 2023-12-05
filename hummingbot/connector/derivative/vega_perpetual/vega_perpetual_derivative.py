@@ -363,7 +363,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
             )
             self._order_tracker.process_order_update(order_update)
             self.logger().debug("Attempting to cancel a failed order, unable to do so.")
-            return True
+            return False
 
         if order.current_state in [OrderState.PENDING_CANCEL, OrderState.PENDING_CREATE]:
             self.logger().debug("Attempting to cancel a pending order, unable to do so.")
@@ -392,7 +392,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
             self.logger().debug(f"Order {tracked_order.current_state} for {order_id}")
             return False
 
-        if tracked_order.current_state not in [OrderState.OPEN, OrderState.PARTIALLY_FILLED]:
+        if tracked_order.current_state not in [OrderState.OPEN, OrderState.PARTIALLY_FILLED, OrderState.CREATED]:
             self.logger().debug(f"Not canceling order due to state {tracked_order.current_state} for {order_id}")
             return False
 
