@@ -1,9 +1,6 @@
 import asyncio
 import json
 import math
-import platform
-import re
-import subprocess
 import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, AsyncIterable, Dict, List, Optional, Tuple
@@ -70,6 +67,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
         self._exchange_order_id_to_hb_order_id = {}
         self._has_updated_throttler = False
         self._best_connection_endpoint = ""
+        self._best_grpc_endpoint = ""
 
         super().__init__(client_config_map)
 
@@ -145,35 +143,41 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
         return 600
 
     async def connection_base(self) -> None:
+        # This function makes requests to all Vega endpoints to determine lowest latency.
         endpoints = CONSTANTS.PERPETUAL_API_ENDPOINTS
         if self._domain == CONSTANTS.TESTNET_DOMAIN:
             endpoints = CONSTANTS.TESTNET_API_ENDPOINTS
+        result = await self.lowest_latency_result(endpoints=endpoints)
+        self._best_connection_endpoint = result
 
+    async def lowest_latency_result(self, endpoints: List[str]) -> str:
         results: List[Dict[str, Decimal]] = []
-
+        rest_assistant = await self._web_assistants_factory.get_rest_assistant()
         for connection in endpoints:
-            _connection = connection.replace("https://", "").replace("/", "")
-            _connection = _connection.split(":")[0]
             try:
-                # Match on the output to fetch the time=
-                time_ms_match = re.search(
-                    "(?<=time=)(.*)",
-                    subprocess.check_output(
-                        "ping -{} 1 {}".format("n" if platform.system().lower() == "windows" else "c", _connection), shell=True
-                    ).decode()
+                url = f"{connection}api/v2{self.check_network_request_path}"
+                _start_time = time.time_ns()
+                request = RESTRequest(
+                    method=RESTMethod.GET,
+                    url=url,
+                    params=None,
+                    data=None,
+                    throttler_limit_id=CONSTANTS.ALL_URLS
                 )
+                await rest_assistant.call(request=request)
+                _end_time = time.time_ns()
+                _request_latency = _end_time - _start_time
                 # Check to ensure we have a match
-                if len(time_ms_match.group()) > 0:
-                    _time_ms = Decimal(time_ms_match[0].replace(' ms', ''))
-                    results.append({"connection": connection, "latency": _time_ms})
+                _time_ms = Decimal(_request_latency)
+                results.append({"connection": connection, "latency": _time_ms})
             except Exception as e:
-                self.logger().debug(f"Unable to fetch and match for endpoint {_connection} {e}")
+                self.logger().debug(f"Unable to fetch and match for endpoint {connection} {e}")
         if len(results) > 0:
             # Sort the results
             sorted_result = sorted(results, key=lambda x: x['latency'])
             # Return the connection endpoint with the best response time
             self.logger().debug(sorted_result[0])
-            self._best_connection_endpoint = sorted_result[0]["connection"]
+            return sorted_result[0]["connection"]
         else:
             raise IOError("Unable to reach any endpoint for Vega Protocol, check configuration and try again.")
 
@@ -396,7 +400,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
             "order_id": tracked_order.exchange_order_id,
             "market_id": market_id
         }
-        transaction = self._auth.sign_payload(cancel_payload, "order_cancellation")
+        transaction = await self._auth.sign_payload(cancel_payload, "order_cancellation")
         data = json.dumps({"tx": str(transaction.decode("utf-8")), "type": "TYPE_SYNC"})
         try:
             response = await self._api_post(
@@ -505,7 +509,7 @@ class VegaPerpetualDerivative(PerpetualDerivativePyBase):
             order_payload["reduce_only"] = reduce_only
 
         # Setup for Sync
-        transaction = self._auth.sign_payload(order_payload, "order_submission")
+        transaction = await self._auth.sign_payload(order_payload, "order_submission")
         data = json.dumps({"tx": str(transaction.decode("utf-8")), "type": "TYPE_SYNC"})
 
         response = await self._api_post(
