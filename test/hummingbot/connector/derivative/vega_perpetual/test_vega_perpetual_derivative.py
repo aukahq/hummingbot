@@ -634,6 +634,9 @@ class VegaPerpetualDerivativeUnitTest(unittest.TestCase):
     @patch("aiohttp.ClientSession.ws_connect", new_callable=AsyncMock)
     def test_ws_error(self, ws_connect_mock):
         ws_connect_mock.return_value = self.mocking_assistant.create_websocket_mock()
+
+        self.exchange._user_stream_tracker.data_source._connector._best_connection_endpoint = "wss://test.com"
+
         self.ev_loop.create_task(self.exchange._user_stream_tracker.start())
 
         self.assertEqual(len(self.exchange.account_positions), 0)
@@ -653,6 +656,7 @@ class VegaPerpetualDerivativeUnitTest(unittest.TestCase):
     def test_ws_invalid_data(self, ws_connect_mock):
 
         ws_connect_mock.return_value = self.mocking_assistant.create_websocket_mock()
+        self.exchange._user_stream_tracker.data_source._connector._best_connection_endpoint = "wss://test.com"
         self.ev_loop.create_task(self.exchange._user_stream_tracker.start())
 
         error_payload = mock_ws.ws_invalid_data()
@@ -683,6 +687,8 @@ class VegaPerpetualDerivativeUnitTest(unittest.TestCase):
     @patch("aiohttp.ClientSession.ws_connect", new_callable=AsyncMock)
     def test_ws_cancel_exception(self, ws_connect_mock):
         ws_connect_mock.return_value = self.mocking_assistant.create_websocket_mock()
+
+        self.exchange._user_stream_tracker.data_source._connector._best_connection_endpoint = "wss://test.com"
         self.ev_loop.create_task(self.exchange._user_stream_tracker.start())
 
         self.mocking_assistant.add_websocket_aiohttp_exception(ws_connect_mock.return_value, exception=asyncio.CancelledError)
@@ -945,6 +951,10 @@ class VegaPerpetualDerivativeUnitTest(unittest.TestCase):
     @aioresponses()
     def test_start_network(self, mock_api):
         self._setup_markets(mock_api)
+
+        network_status_resp = mock_requests._get_network_requests_rest_mock()
+
+        mock_api.get(self.network_status_url, body=json.dumps(network_status_resp))
 
         mock_api.get(self.symbols_url,
                      body=json.dumps(mock_requests._get_exchange_symbols_rest_mock()),
